@@ -16,18 +16,19 @@ console.log(`   Password: ${dbPassword ? '***SET***' : '***EMPTY***'}`);
 console.log(`   Database: ${dbName}`);
 
 const pool = mysql.createPool({
-  host: dbHost,
-  user: dbUser,
-  password: dbPassword,
-  database: dbName,
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT,
+
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  enableKeepAlive: true,
-  // mysql2 expects `keepAliveInitialDelay` (milliseconds). Previously used
-  // `keepAliveInitialDelayMs` which causes a warning and will error in future
-  // versions. Keep the value 0 to start keepalive immediately.
-  keepAliveInitialDelay: 0
+
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 export async function initDb() {
