@@ -1,0 +1,23 @@
+{
+  "passed": [
+    "auth_login",
+    "items_create",
+    "items_update",
+    "items_export",
+    "items_delete",
+    "items_import",
+    "billing_basic",
+    "billing_expired_allowed",
+    "dashboard_summary",
+    "reports_history",
+    "csv_exports",
+    "delete_bill",
+    "perf_smoke"
+  ],
+  "failed": [],
+  "details": [
+    {
+      "perf_time_ms": 3692
+    }
+  ]
+}

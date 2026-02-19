@@ -1,0 +1,12 @@
+{
+  "tests": [
+    "Test 1: FAIL",
+    "Test 2: INFO",
+    "Test 3: PASS",
+    "Test 4: PASS",
+    "Test 5: PASS",
+    "Test 6: PASS"
+  ],
+  "passed": 5,
+  "failed": 1
+}

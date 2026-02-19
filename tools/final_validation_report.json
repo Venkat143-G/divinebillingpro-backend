@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-02-18T11:05:18.878Z",
+  "summary": {
+    "last_profit": -3654.5,
+    "dashboard": {
+      "totalRevenue": "16437.12",
+      "todayRevenue": "16437.12",
+      "totalBills": 379,
+      "pendingAmount": "0.00",
+      "profitAmount": -3804.5
+    },
+    "db_stats": {
+      "bills": 381,
+      "items": 1459,
+      "bill_items": 381,
+      "history": 1495
+    }
+  },
+  "validations": {
+    "backend_online": true,
+    "schema_complete": true,
+    "item_crud": true,
+    "billing_profit": true,
+    "expired_items": true,
+    "dashboard_complete": true,
+    "csv_export": true,
+    "db_integrity": true
+  },
+  "errors": [],
+  "success": true
+}
