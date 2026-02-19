@@ -187,7 +187,7 @@ let expiryLossAmount = 0;
 
 try {
 
-  // 1️⃣ First time expiry detect → store permanently
+  // 1️⃣ Detect expired items (only once store permanent loss)
   const [expiredItems] = await pool.query(`
     SELECT id,item_name,quantity,cost_price,expiry_date
     FROM items
@@ -198,7 +198,7 @@ try {
 
   for (const item of expiredItems){
 
-    // already loss stored or not check
+    // already stored or not check
     const [[exists]] = await pool.query(`
       SELECT id FROM expiry_loss_history
       WHERE item_id=? AND user_id=?
@@ -206,31 +206,40 @@ try {
 
     if(!exists){
 
-      const qty = Number(item.quantity)||0;
-      const cost = Number(item.cost_price)||0;
+      const qty = Number(item.quantity) || 0;
+      const cost = Number(item.cost_price) || 0;
 
+      // 🔥 FIX: only qty * cost
+      // qty = 0 → NO LOSS
       let loss = 0;
-      if(qty>0) loss = qty*cost;
-      else loss = cost;
 
-      await pool.query(`
-        INSERT INTO expiry_loss_history
-        (user_id,item_id,item_name,loss_amount)
-        VALUES(?,?,?,?)
-      `,[uid,item.id,item.item_name,loss]);
+      if(qty > 0){
+        loss = qty * cost;
+      } else {
+        loss = 0; // ❌ do NOT take cost_price if qty=0
+      }
 
-      console.log("LOSS STORED:",item.item_name,loss);
+      // only store if loss > 0
+      if(loss > 0){
+        await pool.query(`
+          INSERT INTO expiry_loss_history
+          (user_id,item_id,item_name,loss_amount)
+          VALUES(?,?,?,?)
+        `,[uid,item.id,item.item_name,loss]);
+
+        console.log("LOSS STORED:",item.item_name,loss);
+      }
     }
   }
 
-  // 2️⃣ Always sum stored loss (permanent)
+  // 2️⃣ Sum permanent loss
   const [[row]] = await pool.query(`
     SELECT COALESCE(SUM(loss_amount),0) as total
     FROM expiry_loss_history
     WHERE user_id=?
   `,[uid]);
 
-  expiryLossAmount = Number(row.total)||0;
+  expiryLossAmount = Number(row.total) || 0;
 
   console.log("TOTAL PERMANENT LOSS:",expiryLossAmount);
 
