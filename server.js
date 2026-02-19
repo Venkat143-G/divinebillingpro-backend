@@ -150,22 +150,35 @@ app.post('/api/auth/register', async (req, res) => {
 app.get('/api/dashboard/summary', async (req, res) => {
   try {
     const uid = getUserId(req);
-    const [[totalRev]] = await pool.query('SELECT COALESCE(SUM(total_amount), 0) as v FROM bills WHERE user_id = ?', [uid]);
-    const [[todayRev]] = await pool.query('SELECT COALESCE(SUM(total_amount), 0) as v FROM bills WHERE user_id = ? AND DATE(created_at) = CURDATE()', [uid]);
-    const [[totalBills]] = await pool.query('SELECT COUNT(*) as v FROM bills WHERE user_id = ?', [uid]);
-    const [[pending]] = await pool.query('SELECT COALESCE(SUM(pending_amount), 0) as v FROM bills WHERE user_id = ?', [uid]);
+    const { start_date, end_date } = req.query || {};
+    let dateFilter = '';
+    const baseParams = [uid];
+    if (start_date && end_date) {
+      dateFilter = ' AND DATE(created_at) BETWEEN ? AND ?';
+    }
+    // apply optional date filter to these metrics
+    const totalRevParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const [[totalRevF]] = await pool.query(`SELECT COALESCE(SUM(total_amount), 0) as v FROM bills WHERE user_id = ?${dateFilter}`, totalRevParams);
+    const todayRevParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const [[todayRevF]] = await pool.query(`SELECT COALESCE(SUM(total_amount), 0) as v FROM bills WHERE user_id = ? AND DATE(created_at) = CURDATE()${dateFilter}`, todayRevParams);
+    const totalBillsParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const [[totalBillsF]] = await pool.query(`SELECT COUNT(*) as v FROM bills WHERE user_id = ?${dateFilter}`, totalBillsParams);
+    const pendingParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const [[pendingF]] = await pool.query(`SELECT COALESCE(SUM(pending_amount), 0) as v FROM bills WHERE user_id = ?${dateFilter}`, pendingParams);
     
     // STEP 1: Calculate billing profit from billed items (KEEP EXISTING LOGIC UNCHANGED)
     // Profit per billed item: (sale_price - cost_price) * qty
     let billingProfitAmount = 0;
     try {
+      // Profit calculation — apply date filter to billed items if provided
+      const billItemsParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
       const [rows] = await pool.query(`
         SELECT bi.quantity as qty, bi.unit_price as sale_price, b.created_at as bill_date, i.cost_price as cost_price, i.expiry_date as expiry_date
         FROM bill_items bi
         JOIN bills b ON bi.bill_id = b.id
         LEFT JOIN items i ON bi.item_id = i.id
-        WHERE b.user_id = ?
-      `, [uid]);
+        WHERE b.user_id = ?${dateFilter}
+      `, billItemsParams);
 
       for (const r of rows) {
         const qty = parseInt(r.qty) || 0;
@@ -232,14 +245,20 @@ try {
     }
   }
 
-  // 2️⃣ Sum permanent loss
-  const [[row]] = await pool.query(`
-    SELECT COALESCE(SUM(loss_amount),0) as total
-    FROM expiry_loss_history
-    WHERE user_id=?
-  `,[uid]);
-
-  expiryLossAmount = Number(row.total) || 0;
+  // 2️⃣ Sum permanent loss (optionally filter expiry history by date range)
+  try {
+    const expiryParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const expiryDateFilter = start_date && end_date ? ' AND DATE(created_at) BETWEEN ? AND ?' : '';
+    const [[row]] = await pool.query(`
+      SELECT COALESCE(SUM(loss_amount),0) as total
+      FROM expiry_loss_history
+      WHERE user_id=?${expiryDateFilter}
+    `, expiryParams);
+    expiryLossAmount = Number(row.total) || 0;
+  } catch (e) {
+    console.warn('Expiry loss sum failed, defaulting to 0', e?.message || e);
+    expiryLossAmount = 0;
+  }
 
   console.log("TOTAL PERMANENT LOSS:",expiryLossAmount);
 
@@ -248,10 +267,39 @@ try {
   expiryLossAmount = 0;
 }
 
-    // STEP 3: Calculate final profit = billing profit - expiry loss
-    const profitAmount = Math.round((billingProfitAmount - expiryLossAmount) * 100) / 100;
+    // STEP 3: Calculate total expenses (apply date filter if provided)
+    let totalExpenses = 0;
+    try {
+      const expenseDateFilter = start_date && end_date ? ' AND DATE(date) BETWEEN ? AND ?' : '';
+      const expenseParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+      const [[eRow]] = await pool.query(`SELECT COALESCE(SUM(amount),0) as total FROM expenses WHERE user_id = ?${expenseDateFilter}`, expenseParams);
+      totalExpenses = Number(eRow.total) || 0;
+    } catch (ee) {
+      console.warn('Expenses sum failed, defaulting to 0', ee?.message || ee);
+      totalExpenses = 0;
+    }
 
-    res.json({ totalRevenue: totalRev.v, todayRevenue: todayRev.v, totalBills: totalBills.v, pendingAmount: pending.v, profitAmount });
+    // STEP 4: Final net profit calculation
+    // Start with sales profit (billingProfitAmount) then subtract expiryLossAmount (permanent loss)
+    const profitAfterExpiry = Math.round((billingProfitAmount - expiryLossAmount) * 100) / 100;
+
+    // Subtract total expenses from profitAfterExpiry
+    const net = Math.round((profitAfterExpiry - totalExpenses) * 100) / 100;
+
+    let profitAmount = 0;
+    let lossAmount = 0;
+    if (net > 0) {
+      profitAmount = net;
+      lossAmount = 0;
+    } else if (net < 0) {
+      profitAmount = 0;
+      lossAmount = Math.abs(net);
+    } else {
+      profitAmount = 0;
+      lossAmount = 0;
+    }
+
+    res.json({ totalRevenue: totalRevF.v, todayRevenue: todayRevF.v, totalBills: totalBillsF.v, pendingAmount: pendingF.v, totalExpenses, profitAmount, lossAmount });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e?.code || e) });
   }
@@ -260,6 +308,11 @@ try {
 app.get('/api/dashboard/revenue-graph', async (req, res) => {
   try {
     const uid = getUserId(req);
+    const { start_date, end_date } = req.query || {};
+    if (start_date && end_date) {
+      const [rows] = await pool.query(`SELECT DATE(created_at) as date, SUM(total_amount) as amount FROM bills WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY date`, [uid, start_date, end_date]);
+      return res.json(rows);
+    }
     const [rows] = await pool.query(`SELECT DATE(created_at) as date, SUM(total_amount) as amount FROM bills WHERE user_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY DATE(created_at) ORDER BY date`, [uid]);
     res.json(rows);
   } catch (e) {
@@ -270,12 +323,177 @@ app.get('/api/dashboard/revenue-graph', async (req, res) => {
 app.get('/api/dashboard/top-items', async (req, res) => {
   try {
     const uid = getUserId(req);
+    const { start_date, end_date } = req.query || {};
+    if (start_date && end_date) {
+      const [rows] = await pool.query(`SELECT bi.item_name, SUM(bi.quantity) as qty, SUM(bi.total) as total FROM bill_items bi JOIN bills b ON bi.bill_id = b.id WHERE b.user_id = ? AND DATE(b.created_at) BETWEEN ? AND ? GROUP BY bi.item_name ORDER BY qty DESC LIMIT 10`, [uid, start_date, end_date]);
+      return res.json(rows);
+    }
     const [rows] = await pool.query(`SELECT bi.item_name, SUM(bi.quantity) as qty, SUM(bi.total) as total FROM bill_items bi JOIN bills b ON bi.bill_id = b.id WHERE b.user_id = ? AND b.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH) GROUP BY bi.item_name ORDER BY qty DESC LIMIT 10`, [uid]);
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e?.code || e) });
   }
 });
+
+// Export dashboard CSV
+app.get('/api/dashboard/export', async (req, res) => {
+  try {
+    const uid = getUserId(req);
+    const { start_date, end_date } = req.query || {};
+
+    // reuse summary logic by calling internal queries
+    const totalRevParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const dateFilter = start_date && end_date ? ' AND DATE(created_at) BETWEEN ? AND ?' : '';
+    const [[totalRevF]] = await pool.query(`SELECT COALESCE(SUM(total_amount), 0) as v FROM bills WHERE user_id = ?${dateFilter}`, totalRevParams);
+    const [[totalBillsF]] = await pool.query(`SELECT COUNT(*) as v FROM bills WHERE user_id = ?${dateFilter}`, totalRevParams);
+
+    // billing profit (apply date filter)
+    const billItemsParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const [rows] = await pool.query(`
+      SELECT bi.quantity as qty, bi.unit_price as sale_price, i.cost_price as cost_price
+      FROM bill_items bi
+      JOIN bills b ON bi.bill_id = b.id
+      LEFT JOIN items i ON bi.item_id = i.id
+      WHERE b.user_id = ?${dateFilter}
+    `, billItemsParams);
+    let billingProfitAmount = 0;
+    for (const r of rows) {
+      const qty = parseInt(r.qty) || 0;
+      const sale = parseFloat(r.sale_price) || 0;
+      const cost = parseFloat(r.cost_price) || 0;
+      billingProfitAmount += ((sale - cost) * qty);
+    }
+    billingProfitAmount = Math.round(billingProfitAmount * 100) / 100;
+
+    // expiry loss (filterable)
+    const expiryParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const expiryDateFilter = start_date && end_date ? ' AND DATE(created_at) BETWEEN ? AND ?' : '';
+    const [[row]] = await pool.query(`SELECT COALESCE(SUM(loss_amount),0) as total FROM expiry_loss_history WHERE user_id=?${expiryDateFilter}`, expiryParams);
+    const expiryLossAmount = Number(row.total) || 0;
+
+    const profitAmount = Math.round((billingProfitAmount - expiryLossAmount) * 100) / 100;
+
+    // top items and revenue summary
+    const topItemsParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const topItemsQuery = start_date && end_date
+      ? `SELECT bi.item_name, SUM(bi.quantity) as qty, SUM(bi.total) as total FROM bill_items bi JOIN bills b ON bi.bill_id = b.id WHERE b.user_id = ? AND DATE(b.created_at) BETWEEN ? AND ? GROUP BY bi.item_name ORDER BY qty DESC LIMIT 10`
+      : `SELECT bi.item_name, SUM(bi.quantity) as qty, SUM(bi.total) as total FROM bill_items bi JOIN bills b ON bi.bill_id = b.id WHERE b.user_id = ? AND b.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH) GROUP BY bi.item_name ORDER BY qty DESC LIMIT 10`;
+    const [topItemsRows] = await pool.query(topItemsQuery, topItemsParams);
+
+    const graphParams = start_date && end_date ? [uid, start_date, end_date] : [uid];
+    const graphQuery = start_date && end_date
+      ? `SELECT DATE(created_at) as date, SUM(total_amount) as amount FROM bills WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY date`
+      : `SELECT DATE(created_at) as date, SUM(total_amount) as amount FROM bills WHERE user_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY DATE(created_at) ORDER BY date`;
+    const [graphRows] = await pool.query(graphQuery, graphParams);
+
+    // Build CSV
+    const rowsCsv = [];
+    const rangeLabel = start_date && end_date ? `${start_date} - ${end_date}` : 'ALL';
+    rowsCsv.push(['Dashboard Report']);
+    rowsCsv.push(['Date Range', rangeLabel]);
+    rowsCsv.push([]);
+    rowsCsv.push(['Total Revenue', totalRevF.v]);
+    rowsCsv.push(['Total Bills', totalBillsF.v]);
+    rowsCsv.push(['Profit Amount', profitAmount]);
+    rowsCsv.push(['Loss Amount', expiryLossAmount]);
+    rowsCsv.push([]);
+    rowsCsv.push(['Top Items']);
+    rowsCsv.push(['Item Name', 'Qty', 'Total']);
+    for (const t of topItemsRows) rowsCsv.push([t.item_name, t.qty, t.total]);
+    rowsCsv.push([]);
+    rowsCsv.push(['Revenue Summary']);
+    rowsCsv.push(['Date', 'Amount']);
+    for (const g of graphRows) rowsCsv.push([g.date, g.amount]);
+
+    // convert to CSV string
+    const csvLines = rowsCsv.map(r => r.map(c => (c === null || typeof c === 'undefined') ? '' : String(c)).map(v => {
+      if (v.includes(',') || v.includes('\n') || v.includes('"')) return '"' + v.replace(/"/g, '""') + '"';
+      return v;
+    }).join(',')).join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="dashboard.csv"');
+    // expose disposition header for CORS clients if needed
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.send(csvLines);
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e?.code || e) });
+  }
+});
+
+    // Expenses API
+    app.get('/api/expenses', async (req, res) => {
+      try {
+        const uid = getUserId(req);
+        try {
+          const [rows] = await pool.query('SELECT id, DATE_FORMAT(date, "%Y-%m-%d") as date, title, category, amount, payment_mode, notes, created_at FROM expenses WHERE user_id = ? ORDER BY date DESC, id DESC', [uid]);
+          // Always return an array, even if empty
+          res.json(Array.isArray(rows) ? rows : []);
+        } catch (dbErr) {
+          // If table doesn't exist or query fails, return empty array instead of error
+          if (import.meta.env?.DEV) console.warn('Expenses query warning:', dbErr?.message);
+          res.json([]);
+        }
+      } catch (e) {
+        console.error('Expenses API error:', String(e?.message || e?.code || e));
+        // Always return an array, never 500, so frontend doesn't crash
+        res.status(200).json([]);
+      }
+    });
+
+    app.post('/api/expenses', async (req, res) => {
+      try {
+        const uid = getUserId(req);
+        const { date, title, category, amount, payment_mode, notes } = req.body;
+        try {
+          const [r] = await pool.query('INSERT INTO expenses (user_id, date, title, category, amount, payment_mode, notes) VALUES (?, ?, ?, ?, ?, ?, ?)', [uid, date || null, title || '', category || '', amount || 0, payment_mode || '', notes || '']);
+          const [[row]] = await pool.query('SELECT id, DATE_FORMAT(date, "%Y-%m-%d") as date, title, category, amount, payment_mode, notes, created_at FROM expenses WHERE id = ? AND user_id = ?', [r.insertId, uid]);
+          res.json(row || { id: r.insertId, date, title, category, amount, payment_mode, notes });
+        } catch (dbErr) {
+          if (import.meta.env?.DEV) console.warn('Expenses create warning:', dbErr?.message);
+          res.status(400).json({ error: 'Failed to create expense' });
+        }
+      } catch (e) {
+        console.error('Expenses create error:', String(e?.message || e?.code || e));
+        res.status(400).json({ error: 'Failed to create expense' });
+      }
+    });
+
+    app.put('/api/expenses/:id', async (req, res) => {
+      try {
+        const uid = getUserId(req);
+        const id = req.params.id;
+        const { date, title, category, amount, payment_mode, notes } = req.body;
+        try {
+          await pool.query('UPDATE expenses SET date = ?, title = ?, category = ?, amount = ?, payment_mode = ?, notes = ? WHERE id = ? AND user_id = ?', [date || null, title || '', category || '', amount || 0, payment_mode || '', notes || '', id, uid]);
+          const [[row]] = await pool.query('SELECT id, DATE_FORMAT(date, "%Y-%m-%d") as date, title, category, amount, payment_mode, notes, created_at FROM expenses WHERE id = ? AND user_id = ?', [id, uid]);
+          res.json(row || { id, date, title, category, amount, payment_mode, notes });
+        } catch (dbErr) {
+          if (import.meta.env?.DEV) console.warn('Expenses update warning:', dbErr?.message);
+          res.status(400).json({ error: 'Failed to update expense' });
+        }
+      } catch (e) {
+        console.error('Expenses update error:', String(e?.message || e?.code || e));
+        res.status(400).json({ error: 'Failed to update expense' });
+      }
+    });
+
+    app.delete('/api/expenses/:id', async (req, res) => {
+      try {
+        const uid = getUserId(req);
+        const id = req.params.id;
+        try {
+          await pool.query('DELETE FROM expenses WHERE id = ? AND user_id = ?', [id, uid]);
+          res.json({ ok: true, id });
+        } catch (dbErr) {
+          if (import.meta.env?.DEV) console.warn('Expenses delete warning:', dbErr?.message);
+          res.status(400).json({ error: 'Failed to delete expense' });
+        }
+      } catch (e) {
+        console.error('Expenses delete error:', String(e?.message || e?.code || e));
+        res.status(400).json({ error: 'Failed to delete expense' });
+      }
+    });
 
 app.get('/api/items', async (req, res) => {
   try {

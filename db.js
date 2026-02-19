@@ -161,6 +161,23 @@ export async function initDb() {
         INDEX idx_item_code (item_code)
       )
     `);
+      // Expenses table
+      await poolConn.query(`
+        CREATE TABLE IF NOT EXISTS expenses (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          user_id INT,
+          date DATE,
+          title VARCHAR(255),
+          category VARCHAR(100),
+          amount DECIMAL(12,2) DEFAULT 0,
+          payment_mode VARCHAR(50),
+          notes TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          INDEX idx_user_id_expenses (user_id),
+          INDEX idx_date (date)
+        )
+      `);
     // ensure uom column exists on existing installations
     try {
       const dbName = process.env.DB_NAME || 'medical_billing';

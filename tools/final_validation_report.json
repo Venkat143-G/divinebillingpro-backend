@@ -1,19 +1,21 @@
 {
-  "timestamp": "2026-02-18T11:05:18.878Z",
+  "timestamp": "2026-02-19T14:03:27.396Z",
   "summary": {
-    "last_profit": -3654.5,
+    "last_profit": 400,
     "dashboard": {
-      "totalRevenue": "16437.12",
-      "todayRevenue": "16437.12",
-      "totalBills": 379,
+      "totalRevenue": "1280.00",
+      "todayRevenue": "1280.00",
+      "totalBills": 2,
       "pendingAmount": "0.00",
-      "profitAmount": -3804.5
+      "totalExpenses": 0,
+      "profitAmount": 250,
+      "lossAmount": 0
     },
     "db_stats": {
-      "bills": 381,
-      "items": 1459,
-      "bill_items": 381,
-      "history": 1495
+      "bills": 2,
+      "items": 2,
+      "bill_items": 2,
+      "history": 4
     }
   },
   "validations": {
